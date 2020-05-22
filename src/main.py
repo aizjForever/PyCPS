@@ -31,9 +31,10 @@ def exec(f, x):
 ######
 #
 # To do: Multiple function arguments / assignment
-#        Support more constructs
+#        Support more constructs: for, while, 
 #        Need to insert return statements when necessary
 #        advanced: need to keep track of the scope of variables and declare global when necessary
+#        different lazy eval strategy: yield vs. lambda (): ...
 #
 ######
 
