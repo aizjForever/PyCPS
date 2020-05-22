@@ -7,11 +7,13 @@ class Unimplemented(Exception):
     pass
 
 s = """
-tally = 0
+s = 0
 def f(x):
     if x:
-        return x + f(x-1)
-    return 0
+        f(x-1)
+        s = s + x
+    return 
+
     
     
 """
