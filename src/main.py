@@ -15,7 +15,7 @@ def exec(f, *args):
     return val
 
 # Note: to run your function, just run `exec(fun_name, arg)' v1.0 only supports function calls with one argument
-
+# To call a function with multiple arguments, wrap the arguments in a tuple and unwrap in the beginning of the function
 """
 
 
