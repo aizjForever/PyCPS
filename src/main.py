@@ -6,21 +6,10 @@ import astor
 class Unimplemented(Exception):
     pass
 
-s = """
-s = 0
-def f(x):
-    if x:
-        f(x-1)
-        s = s + x
-    return 
-
-    
-    
-"""
-exe = """
+EXEC = """
 identity = lambda x: x
-def exec(f, x):
-    val = f(x, identity)
+def exec(f, *args):
+    val = f(*args, identity)
     while callable(val):
         val = val()
     return val
@@ -35,7 +24,7 @@ def exec(f, x):
 # To do: Multiple function arguments / assignment
 #        Support more constructs: for, while, 
 #        Need to insert return statements when necessary
-#        advanced: need to keep track of the scope of variables and declare global when necessary
+#        additional pass: fix the scope of variables and declare global when necessary
 #        different lazy eval strategy: yield vs. lambda (): ...
 #
 ######
@@ -45,7 +34,7 @@ def exec(f, x):
 def transform(s):
     m = ast.parse(s)
     a = trans_mod(m)
-    return astor.to_source(Module(body = a)) + exe
+    return astor.to_source(Module(body = a)) + EXEC
 
 def make_arguments(args):
     return arguments(posonlyargs = [], args = args, vararg = None, kwonlyargs = [],
@@ -110,11 +99,13 @@ def trans_stmts(stmts, s_accu = [], kres = None):
 
             body = stmt.body
 
-            s, k = trans_stmts(body)
+            ktemp = Variable.newvar ()
+            s, k = trans_stmts(body, 
+                   s_accu = [Return(value = lazy_func_call(func = Name(str(ktemp), ctx = Load), 
+                            args = [Constant(value = None, kind = None)], keywords = [])[0])], 
+                   kres = ktemp) # always append a `return None' to function defns
 
-            if k is None:
-                k = Variable.newvar ()
-           
+            assert k is not None
 
             defn = FunctionDef(name = stmt.name, 
                                args = make_arguments(args.args + [make_arg(str(k))]),
@@ -241,8 +232,19 @@ def trans_stmts(stmts, s_accu = [], kres = None):
 
     return s_accu, kres
 
+def trans_slice(s):
+    # return itself if no control flow switching
+    if isinstance(s, Slice):
+        pass
+
+    elif isinstance(s, ExtSlice):
+        pass
+
+    elif isinstance(s, Index):
+        value = s.value
+        return trans_exp(value)
+
 def trans_exp_node(e, exps):
-    assert len(exps)
     operands = [None for _ in exps]
     kres = Variable.newvar ()
     s_accu = None
@@ -267,8 +269,6 @@ def trans_exp_node(e, exps):
                                      body = s_accu, decorator_list = [], returns = None, 
                                      type_comment = None)] + s
 
-    print (operands)
-    print(astor.to_source(e))
     if s_accu is not None:
         return s_accu, kres, operands, b
     else:
@@ -378,7 +378,6 @@ def trans_exp(e):
             return s, k
 
         else:
-            f1n = Name(str(f1), Store)
             f2n = Name(str(f2), Store)
             f = Variable.newvar ()
             x = Variable.newvar ()
@@ -386,16 +385,180 @@ def trans_exp(e):
             lam_body, _ = lazy_func_call(func = Name(str(f), ctx = Load), args = [Name(str(x), ctx = Load), Name(str(k), ctx = Load)], keywords = [])
             lam = Lambda (make_singleton_argument(str(x)), lam_body)
             defn_body = [Assign([f2n], lam)] + v2
-            defn = FunctionDef(name = str(f1n), args = make_singleton_argument(str(f)), 
+            defn = FunctionDef(name = str(f1), args = make_singleton_argument(str(f)), 
                                body = defn_body, decorator_list = [], returns = None,
                                type_comment = None)
             s = [defn] + v1
             return s, k
 
+    elif isinstance(e, Compare):
+        left = e.left
+        comparators = e.comparators
+        ops = e.ops
+
+        values = [left] + comparators
+        s, k, operands, b = trans_exp_node(e, values)
+
+        if k is None:
+            return s, k
+        else:
+            b.args = [Compare(left = operands[0], ops = ops, comparators = operands[1:])]
+            return s, k
+
+    elif isinstance(e, List):
+        elts = e.elts
+        ctx = e.ctx
+
+        s, k, operands, b = trans_exp_node(e, elts)
+        if k is None:
+            return s, k
+        else:
+            b.args = [List(elts = operands, ctx = ctx)]
+            return s, k
+
+    elif isinstance(e, Tuple):
+        elts = e.elts
+        ctx = e.ctx
+
+        s, k, operands, b = trans_exp_node(e, elts)
+        if k is None:
+            return s, k
+        else:
+            b.args = [Tuple(elts = operands, ctx = ctx)]
+            return s, k
+
+    elif isinstance(e, Attribute):
+        value = e.value
+        attr = e.attr
+        ctx = e.ctx
+
+        s, k, operands, b = trans_exp_node(e, [value])
+        if k is None:
+            return s, k
+        else:
+            b.args = [Attribute(value = operands[0], attr = attr, ctx = ctx)]
+            return s, k
+
+    elif isinstance(e, Subscript):
+        value = e.value
+        sli = e.slice
+        ctx = e.ctx
+
+        s2, k2 = trans_exp(value)
+        if isinstance(sli, Slice):
+            val = []
+            if sli.lower is not None:
+                val.append(sli.lower)
+            if sli.upper is not None:
+                val.append(sli.upper)
+            if sli.step is not None:
+                val.append(sli.step)
+
+            s, k, operands, b = trans_exp_node(e, val)
+            if k is None:
+                if k2 is None:
+                    return e, None
+                else:
+                    x = Variable.newvar ()
+                    k = Variable.newvar ()
+                    lam_body = lazy_func_call(func = Name(str(k), ctx = Load), 
+                                              args = [Subscript(Name(str(x), ctx = Load), sli, ctx)], 
+                                              keywords = [])[0]
+
+                    lam = Lambda(make_singleton_argument(str(x)), lam_body)
+                    s = [Assign([Name(str(k2), ctx = Store)], lam)] + s2
+                    return s, k
+            else:
+                if sli.lower is not None:
+                    lower = operands[0]
+                    operands = operands[1:]
+                else:
+                    lower = None
+
+                if sli.upper is not None:
+                    upper = operands[0]
+                    operands = operands[1:]
+                else:
+                    upper = None
+
+                if sli.step is not None:
+                    step = operands[0]
+                    operands = operands[1:]
+                else:
+                    step = None
+
+                if k2 is None:
+                    b.args = [Subscript(s2, Slice(lower, upper, step), ctx)]
+
+                    return s, k
+
+                else:
+                    x = Variable.newvar ()
+                    b.args = [Subscript(Name(str(x), ctx = Load), Slice(lower, upper, step), ctx)]
+                    defn = FunctionDef(name = str(k2),
+                                       args = make_singleton_argument(str(x)), 
+                                       body = s,
+                                       decorator_list = [], returns = None, type_comment = None
+                                       )
+                    ss = [defn] + s2
+                    return ss, k
+
+        elif isinstance(sli, Index):
+            val = sli.value
+            s1, k1 = trans_exp(val)
+            if k1 is None and k2 is None:
+                return e, None
+            elif k1 is not None and k2 is None:
+                x = Variable.newvar ()
+                k = Variable.newvar ()
+                lam_body = lazy_func_call(func = Name(str(k), ctx = Load), 
+                                          args = [Subscript(s2, Index(Name(str(x))), ctx)], 
+                                          keywords = [])[0]
+
+                lam = Lambda(make_singleton_argument(str(x)), lam_body)
+                s = [Assign([Name(str(k1), ctx = Store)], lam)] + s1
+                return s, k
+
+            elif k1 is None and k2 is not None:
+                x = Variable.newvar ()
+                k = Variable.newvar ()
+                lam_body = lazy_func_call(func = Name(str(k), ctx = Load), 
+                                          args = [Subscript(Name(str(x), ctx = Load), sli, ctx)], 
+                                          keywords = [])[0]
+
+                lam = Lambda(make_singleton_argument(str(x)), lam_body)
+                s = [Assign([Name(str(k2), ctx = Store)], lam)] + s2
+                return s, k
+
+            else:
+                x = Variable.newvar ()
+                y = Variable.newvar ()
+                k = Variable.newvar ()
+                lam_body = lazy_func_call(func = Name(str(k), ctx = Load), 
+                                    args = [Subscript(Name(str(x), ctx = Load), Index(Name(str(y), ctx = Load)), ctx)], 
+                                    keywords = [])[0]
+
+                lam = Lambda(make_singleton_argument(str(y)), lam_body)
+                defn_body = [Assign([Name(str(k1), ctx = Store)], lam)] + s1
+                defn = FunctionDef(name = str(k2), args = make_singleton_argument(str(x)),
+                                   body = defn_body,
+                                   decorator_list = [], returns = None, type_comment = None)
+                s = [defn] + s2
+
+                return s, k
+
+        else:
+            # Extended slices
+            raise Unimplemented
+
 
     else:
         # default branch of trans_exp
         return e, None
+
+if __name__ == "__main__":
+    with open("../example/simple.py", "r") as f:
+        print(transform(f.read()))
 
 
 
