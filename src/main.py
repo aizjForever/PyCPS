@@ -21,11 +21,11 @@ def exec(f, *args):
 
 ######
 #
-# To do: Multiple function arguments / assignment
-#        Support more constructs: for, while, 
-#        Need to insert return statements when necessary
+# To do: Multiple function call arguments
 #        additional pass: fix the scope of variables and declare global when necessary
 #        different lazy eval strategy: yield vs. lambda (): ...
+#        In trans_while, need to figure out what nonlocal variables are used in order to update 
+#        the defaults for the keyword args (done in additional pass)
 #
 ######
 
@@ -39,6 +39,10 @@ def transform(s):
 def make_arguments(args):
     return arguments(posonlyargs = [], args = args, vararg = None, kwonlyargs = [],
                      kw_defaults = [], kwarg= None,   defaults = [])
+
+def make_default_arguments(args, defaults):
+    return arguments(posonlyargs = [], args = args, vararg = None, kwonlyargs = [],
+                     kw_defaults = [], kwarg= None,   defaults = defaults)
 
 def make_arg(a):
     return arg(arg = a, annotation = None, type_comment = None)
@@ -68,6 +72,86 @@ def base_stmts(s_accu):
                      args = [], keywords = [])[0])] + s_accu 
 
     return kres, s_accu
+
+
+def local_vars_exps(es):
+    res = []
+    for e in es:
+        if isinstance(e, Name):
+            res.append(e.id)
+        elif isinstance(e, List):
+            res.extend(local_vars_exps(e.elts))
+        elif isinstance(e, Tuple):
+            res.extend(local_vars_exps(e.elts))
+
+    return res
+
+def local_vars(stmts):
+    # find the local vars in a sequence of statements
+    vs = []
+    for s in stmts:
+        if isinstance(s, Assign):
+            vs.extend(local_vars_exps(s.targets))
+        else:
+            continue
+
+    return vs
+
+
+def trans_while_stmts(stmts):
+    res = []
+    for s in stmts:
+        if isinstance(s, While):
+            res += trans_while(s)
+        else:
+            res.append(s)
+
+    return res
+
+def trans_while(w):
+    # Returns a sequence of stmts
+    # Turns a while statement into a function declaration
+    # No actual CPS transformation performed
+
+    # To-do: correctly set the default args
+    assert isinstance(w, While)
+    
+    body = trans_while_stmts(w.body)
+    orelse = trans_while_stmts(w.orelse)
+
+
+
+    lvs = local_vars(body)
+    lvs_as_args = [make_arg(lv) for lv in lvs]
+
+    lvs_orelse = local_vars(orelse)
+    print(lvs_orelse)
+
+    while_f = Variable.newvar() 
+    test = Variable.newvar ()
+
+    if_body = body + [Return(value = Call(func = Name(str(while_f), ctx = Load), args = [], 
+              keywords = [keyword(arg = str(test), value = w.test)] + [keyword(arg = lv, value = Name(lv, ctx = Load)) for lv in lvs]))]
+
+
+    if_orelse = orelse + [Return(value = Tuple([Name(elt, ctx = Load) for elt in lvs_orelse], ctx = Load))]
+
+    defn_body = [If(Name(str(test), ctx = Load), if_body, if_orelse)]
+    defn = FunctionDef(name = str(while_f),
+                       args = make_default_arguments([str(test)] + lvs_as_args, 
+                             [w.test] + [Constant(value = None) for lv in lvs]),
+
+                       body = defn_body,
+                       decorator_list = [], returns = None, type_comment = None)
+
+    s_while = [defn] + ([Assign([Tuple([Name(x, ctx = Store) for x in lvs_orelse], ctx = Store)], 
+                                Call(func = Name(str(while_f), ctx = Load), args = [], keywords = []))] if len(lvs_orelse) else [])
+
+    return s_while
+
+
+
+
 
 def trans_stmts(stmts, s_accu = [], kres = None):
     # represents a scope
@@ -228,7 +312,7 @@ def trans_stmts(stmts, s_accu = [], kres = None):
                 s_accu = [defn] + st
 
         else:
-            raise Unimplemented
+            s_accu = [stmt] + s_accu
 
     return s_accu, kres
 
@@ -547,18 +631,44 @@ def trans_exp(e):
 
                 return s, k
 
+
         else:
             # Extended slices
             raise Unimplemented
 
+    elif isinstance(e, Dict):
+        keys = e.keys
+        values = e.values
+
+        s, k, operands, b = trans_exp_node(e, [i for t in zip(keys, values) for i in t])
+
+        if k is None:
+            return e, None
+        else:
+
+            b.args = [Dict(operands[0::2], operands[1::2])]
+            return s, k
+
+    elif isinstance(e, Set):
+        elts = e.elts
+
+        s, k, operands, b = trans_exp_node(e, elts)
+        if k is None:
+            return e, None
+        else:
+            b.args = [Set(operands)]
+            return s, k
 
     else:
         # default branch of trans_exp
         return e, None
 
 if __name__ == "__main__":
-    with open("../example/simple.py", "r") as f:
+    with open("../example/dict.py", "r") as f:
         print(transform(f.read()))
+    
+
+
 
 
 
