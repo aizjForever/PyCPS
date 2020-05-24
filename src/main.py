@@ -75,66 +75,101 @@ def base_stmts(s_accu):
 
 
 def local_vars_exps(es):
-    res = []
+    res = set()
     for e in es:
         if isinstance(e, Name):
-            res.append(e.id)
+            res.add(e.id)
         elif isinstance(e, List):
-            res.extend(local_vars_exps(e.elts))
+            res = res.union(local_vars_exps(e.elts))
         elif isinstance(e, Tuple):
-            res.extend(local_vars_exps(e.elts))
+            res = res.union(local_vars_exps(e.elts))
 
     return res
 
 def local_vars(stmts):
     # find the local vars in a sequence of statements
-    vs = []
+    vs = set()
     for s in stmts:
         if isinstance(s, Assign):
-            vs.extend(local_vars_exps(s.targets))
-        else:
-            continue
+            vs = vs.union(local_vars_exps(s.targets))
+        elif isinstance(s, If):
+            vs = vs.union(local_vars(s.body).union(local_vars(s.orelse)))
 
     return vs
 
+def trans_continue(while_f, test, test_exp, lvs):
+    return [Return(value = Call(func = Name(str(while_f), ctx = Load), args = [], 
+            keywords = [keyword(arg = str(test), 
+                    value = test_exp)] + [keyword(arg = lv, 
+                                     value = Name(lv, ctx = Load)) for lv in lvs]))]
 
-def trans_while_stmts(stmts):
+def trans_while_stmts(stmts, while_f = None, test = None, test_exp = None, short = False):
     res = []
+    vs = set()
     for s in stmts:
         if isinstance(s, While):
-            res += trans_while(s)
-        else:
-            res.append(s)
+            s_res, vsn = trans_while(s)
+            res += s_res
+            vs = vs.union(set(vsn))
 
-    return res
+        elif isinstance(s, Break):
+            # need to be inside a loop
+            assert all([while_f, test, test_exp])
+            if not short:
+                res += [Return(value = [Constant(value = False), 
+                      Tuple([Name(elt, ctx = Load) for elt in sorted(vs)], ctx = Load)], ctx = Load)]
+            else:
+                res += [Return(value = Tuple([Name(elt, ctx = Load) for elt in sorted(vs)], ctx = Load))]
+
+        elif isinstance(s, Continue):
+            # need to be inside a loop
+            assert all([while_f, test, test_exp])
+            res += trans_continue(while_f, test, test_exp, vs)
+
+        elif isinstance(s, If):
+
+            vv = local_vars([s])
+            # Assigne default values to vars defined in If in case they are not actually defined
+            res += [Assign([Name(v, ctx = Store) for v in vv], Constant(value = None))] + [s] 
+            vs = vs.union(vv)
+
+        elif isinstance(s, Assign):
+            v = local_vars([s])
+            vs = vs.union(v)
+            res += [s]
+
+        else:
+            res += [s]
+
+    return res, sorted(vs)
 
 def trans_while(w):
-    # Returns a sequence of stmts
+    # Returns a sequence of stmts and the local variables defined in the while construct
     # Turns a while statement into a function declaration
     # No actual CPS transformation performed
 
     # To-do: correctly set the default args
     assert isinstance(w, While)
     
-    body = trans_while_stmts(w.body)
-    orelse = trans_while_stmts(w.orelse)
-
-
-
-    lvs = local_vars(body)
-    lvs_as_args = [make_arg(lv) for lv in lvs]
-
-    lvs_orelse = local_vars(orelse)
-    print(lvs_orelse)
-
     while_f = Variable.newvar() 
     test = Variable.newvar ()
 
-    if_body = body + [Return(value = Call(func = Name(str(while_f), ctx = Load), args = [], 
-              keywords = [keyword(arg = str(test), value = w.test)] + [keyword(arg = lv, value = Name(lv, ctx = Load)) for lv in lvs]))]
+    orelse, lvs_orelse = trans_while_stmts(w.orelse)
+    body, lvs = trans_while_stmts(w.body, while_f = while_f, test = test, test_exp = w.test, short = not len(lvs_orelse))
+    
+
+    total_lvs = lvs + lvs_orelse
+
+    lvs_as_args = [make_arg(lv) for lv in lvs]
 
 
-    if_orelse = orelse + [Return(value = Tuple([Name(elt, ctx = Load) for elt in lvs_orelse], ctx = Load))]
+    if_body = body + trans_continue(while_f, test, w.test, lvs)
+
+    if len(lvs_orelse):
+        if_orelse = orelse + [Return(value = Tuple([Constant(value = True), Tuple([Name(elt, ctx = Load) for elt in total_lvs], ctx = Load)], ctx = Load))]
+    else:
+        if_orelse = orelse + [Return(value = Tuple([Name(elt, ctx = Load) for elt in total_lvs], ctx = Load), ctx = Load)]
+
 
     defn_body = [If(Name(str(test), ctx = Load), if_body, if_orelse)]
     defn = FunctionDef(name = str(while_f),
@@ -144,11 +179,28 @@ def trans_while(w):
                        body = defn_body,
                        decorator_list = [], returns = None, type_comment = None)
 
-    s_while = [defn] + ([Assign([Tuple([Name(x, ctx = Store) for x in lvs_orelse], ctx = Store)], 
-                                Call(func = Name(str(while_f), ctx = Load), args = [], keywords = []))] if len(lvs_orelse) else [])
+    if len(lvs_orelse):
 
-    return s_while
+        returnNormal = Variable.newvar()
+        assn = Variable.newvar ()
+        assn_body = Assign([Tuple([Name(v, ctx = Store) for v in total_lvs], ctx = Store)], Name(str(assn), ctx = Load))
+        assn_orelse = Assign([Tuple([Name(v, ctx = Store) for v in lvs], ctx = Store)], Name(str(assn), ctx = Load))
 
+
+        back_to_scope = [Assign([Tuple([Name(str(returnNormal), ctx = Store), 
+                                        Name(str(assn), ctx = Store)], ctx = Store)], 
+                                Call(func = Name(str(while_f), ctx = Load), args = [], keywords = [])),
+
+                         If(Name(str(returnNormal), ctx = Load), [assn_body], [assn_orelse])]
+
+
+        s_while = [defn] + back_to_scope
+
+    else:
+        s_while = [defn] + [Assign([Tuple([Name(x, ctx = Store) for x in total_lvs], ctx = Store)], 
+                                Call(func = Name(str(while_f), ctx = Load), args = [], keywords = []))]
+
+    return s_while, total_lvs
 
 
 
@@ -636,6 +688,18 @@ def trans_exp(e):
     else:
         # default branch of trans_exp
         return e, None
+
+s = """
+while c:
+    while True:
+        p = 5
+        break
+    k = 7
+    break
+
+
+
+"""
 
 if __name__ == "__main__":
     with open("../example/dict.py", "r") as f:
