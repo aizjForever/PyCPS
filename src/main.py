@@ -9,7 +9,7 @@ class Unimplemented(Exception):
 EXEC = """
 identity = lambda x: x
 def exec(f, *args):
-    val = f(*args, identity)
+    val = f(identity, *args)
     while callable(val):
         val = val()
     return val
@@ -177,8 +177,6 @@ def trans_stmts(stmts, s_accu = [], kres = None):
                 
         elif isinstance(stmt, FunctionDef):
             args = stmt.args
-            assert len(args.args) == 1
-
 
 
             body = stmt.body
@@ -192,7 +190,7 @@ def trans_stmts(stmts, s_accu = [], kres = None):
             assert k is not None
 
             defn = FunctionDef(name = stmt.name, 
-                               args = make_arguments(args.args + [make_arg(str(k))]),
+                               args = make_default_arguments([make_arg(str(k))] + args.args, stmt.args.defaults),
                                body = s,
                                decorator_list = [],
                                returns = None,
@@ -354,9 +352,9 @@ def trans_exp_node(e, exps):
                                      type_comment = None)] + s
 
     if s_accu is not None:
-        return s_accu, kres, operands, b
+        return s_accu, kres, operands, b, lam
     else:
-        return e, None, None, None
+        return e, None, None, None, None
 
 
 def trans_exp(e):
@@ -365,7 +363,7 @@ def trans_exp(e):
     if isinstance(e, BoolOp):
         op = e.op
         values = e.values
-        s, k, operands, b = trans_exp_node(e, values)
+        s, k, operands, b, _ = trans_exp_node(e, values)
         if k is None:
             return s, k
         else:
@@ -375,7 +373,7 @@ def trans_exp(e):
     elif isinstance(e, BinOp):
         op = e.op
         exps = [e.left, e.right]
-        s, k, operands, b = trans_exp_node(e, exps)
+        s, k, operands, b, _ = trans_exp_node(e, exps)
         if k is None:
             return s, k
         else:
@@ -386,7 +384,7 @@ def trans_exp(e):
     elif isinstance(e, UnaryOp):
         op = e.op
         exps = [e.operand]
-        s, k, operands, b = trans_exp_node(e, exps)
+        s, k, operands, b, _ = trans_exp_node(e, exps)
         if k is None:
             return s, k
         else:
@@ -433,47 +431,23 @@ def trans_exp(e):
 
     elif isinstance(e, Call):
         func = e.func
-        params = e.args
-        assert len(params) == 1
-        [a] = params
-        v1, f1 = trans_exp(func)
-        v2, f2 = trans_exp(a)
+        args = e.args
+        keyword_exps = [keyword.value for keyword in e.keywords]
 
-        if f1 is None and f2 is None:
-            k = Variable.newvar ()
-            s = [Return(value = lazy_func_call(func = func, args = [a, Name(str(k), ctx = Load)], keywords = [])[0])]
-            return s, k
-        elif f1 is None and f2 is not None:
-            f2n = Name(str(f2), Store)
-            x = Variable.newvar ()
-            k = Variable.newvar ()
-            lam_body, _ = lazy_func_call(func = func, args = [Name(str(x), ctx = Load), Name(str(k), ctx = Load)], keywords = [])
-            lam = Lambda(make_singleton_argument(str(x)), lam_body)
-            s = [Assign([f2n], lam)] + v2
-            return s, k
+        s, k, operands, b, lam = trans_exp_node(e, [func] + args + keyword_exps)
 
-        elif f1 is not None and f2 is None:
-            f1n = Name(str(f1), Store)
-            f = Variable.newvar ()
+        if k is None:
             k = Variable.newvar ()
-            lam_body, _ = lazy_func_call(func = Name(str(f), ctx = Load), args = [a, Name(str(k), ctx = Load)], keywords = [])
-            lam = Lambda(make_singleton_argument(str(f)), lam_body)
-            s = [Assign([f1n], lam)] + v1
-            return s, k
+            return [Return(value=lazy_func_call(func = func, args = [Name(str(k), ctx = Load)] + e.args, keywords = e.keywords)[0])], k
 
         else:
-            f2n = Name(str(f2), Store)
-            f = Variable.newvar ()
-            x = Variable.newvar ()
-            k = Variable.newvar ()
-            lam_body, _ = lazy_func_call(func = Name(str(f), ctx = Load), args = [Name(str(x), ctx = Load), Name(str(k), ctx = Load)], keywords = [])
-            lam = Lambda (make_singleton_argument(str(x)), lam_body)
-            defn_body = [Assign([f2n], lam)] + v2
-            defn = FunctionDef(name = str(f1), args = make_singleton_argument(str(f)), 
-                               body = defn_body, decorator_list = [], returns = None,
-                               type_comment = None)
-            s = [defn] + v1
+            print("33")
+            lam.body = lazy_func_call(func = operands[0], 
+                                      args = [Name(str(k), ctx = Load)] + operands[1:len(e.args) + 1], 
+                                      keywords = [keyword(a.arg, b) for a, b in zip(e.keywords, operands[len(e.args) + 1:])])[0]
+
             return s, k
+
 
     elif isinstance(e, Compare):
         left = e.left
@@ -481,7 +455,7 @@ def trans_exp(e):
         ops = e.ops
 
         values = [left] + comparators
-        s, k, operands, b = trans_exp_node(e, values)
+        s, k, operands, b, _ = trans_exp_node(e, values)
 
         if k is None:
             return s, k
@@ -493,7 +467,7 @@ def trans_exp(e):
         elts = e.elts
         ctx = e.ctx
 
-        s, k, operands, b = trans_exp_node(e, elts)
+        s, k, operands, b, _ = trans_exp_node(e, elts)
         if k is None:
             return s, k
         else:
@@ -504,7 +478,7 @@ def trans_exp(e):
         elts = e.elts
         ctx = e.ctx
 
-        s, k, operands, b = trans_exp_node(e, elts)
+        s, k, operands, b, _ = trans_exp_node(e, elts)
         if k is None:
             return s, k
         else:
@@ -516,7 +490,7 @@ def trans_exp(e):
         attr = e.attr
         ctx = e.ctx
 
-        s, k, operands, b = trans_exp_node(e, [value])
+        s, k, operands, b, _ = trans_exp_node(e, [value])
         if k is None:
             return s, k
         else:
@@ -538,7 +512,7 @@ def trans_exp(e):
             if sli.step is not None:
                 val.append(sli.step)
 
-            s, k, operands, b = trans_exp_node(e, val)
+            s, k, operands, b, _ = trans_exp_node(e, val)
             if k is None:
                 if k2 is None:
                     return e, None
@@ -640,7 +614,7 @@ def trans_exp(e):
         keys = e.keys
         values = e.values
 
-        s, k, operands, b = trans_exp_node(e, [i for t in zip(keys, values) for i in t])
+        s, k, operands, b, _ = trans_exp_node(e, [i for t in zip(keys, values) for i in t])
 
         if k is None:
             return e, None
@@ -652,7 +626,7 @@ def trans_exp(e):
     elif isinstance(e, Set):
         elts = e.elts
 
-        s, k, operands, b = trans_exp_node(e, elts)
+        s, k, operands, b, _ = trans_exp_node(e, elts)
         if k is None:
             return e, None
         else:
