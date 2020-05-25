@@ -103,6 +103,14 @@ def trans_continue(while_f, test, test_exp, lvs):
                     value = test_exp)] + [keyword(arg = lv, 
                                      value = Name(lv, ctx = Load)) for lv in lvs]))]
 
+
+def test_vars_in_scope(lvs):
+    return [Try([Expr(value=Name(v, ctx = Load))], 
+                      handlers = [ExceptHandler(type = Name('NameError', ctx = Load), 
+                        body = [Assign([Name(str(v), ctx = Store)], Constant(value = None))],
+                        name = None)], 
+                      orelse = [], finalbody = []) for v in lvs]
+
 def trans_while_stmts(stmts, while_f = None, test = None, test_exp = None, short = False):
     res = []
     vs = set()
@@ -130,7 +138,7 @@ def trans_while_stmts(stmts, while_f = None, test = None, test_exp = None, short
 
             vv = local_vars([s])
             # Assigne default values to vars defined in If in case they are not actually defined
-            res += [Assign([Name(v, ctx = Store) for v in vv], Constant(value = None))] + [s] 
+            res += [s] + test_vars_in_scope(vv)
             vs = vs.union(vv)
 
         elif isinstance(s, Assign):
@@ -166,7 +174,8 @@ def trans_while(w):
     if_body = body + trans_continue(while_f, test, w.test, lvs)
 
     if len(lvs_orelse):
-        if_orelse = orelse + [Return(value = Tuple([Constant(value = True), Tuple([Name(elt, ctx = Load) for elt in total_lvs], ctx = Load)], ctx = Load))]
+        if_orelse = orelse + [Return(value = Tuple([Constant(value = True), 
+                     Tuple([Name(elt, ctx = Load) for elt in total_lvs], ctx = Load)], ctx = Load))]
     else:
         if_orelse = orelse + [Return(value = Tuple([Name(elt, ctx = Load) for elt in total_lvs], ctx = Load), ctx = Load)]
 
@@ -202,6 +211,41 @@ def trans_while(w):
 
     return s_while, total_lvs
 
+def trans_for_stmts(stmts):
+    res = []
+    for s in stmts:
+        if isinstance(s, For):
+            res.append(trans_for(s))
+        else:
+            res.append(s)
+
+    return res
+
+def trans_for(s):
+    assert isinstance(s, For)
+
+    target = s.target
+    iter_exp = s.iter
+    body = s.body
+    orelse = s.orelse
+
+    it = Variable.newvar ()
+    test = Variable.newvar ()
+    pre = [Assign([Tuple([Name(str(it), ctx = Store), Name(str(test), ctx = Store)], ctx = Store)], 
+                   Tuple([Call(func = Attribute(value = iter_exp, attr = '__iter__', ctx = Load), args = [], keywords = []), 
+                    Constant(value = True)], ctx = Load))]
+    tryexcept = Try([Assign([target], Call(func = Name('next', ctx = Load), args = [Name(str(it), ctx = Load)], keywords = []))], 
+                     handlers = [ExceptHandler(type = Name('StopIteration', ctx = Load), name = None, 
+                        body = [Assign([Name(str(test), ctx = Store)], Constant(value = False))])],
+                     orelse = [], finalbody = [])
+    ifbody = If(Name(str(test), ctx = Load), trans_for_stmts(body), [])
+
+    while_body = [tryexcept, ifbody]
+    while_orelse = trans_for_stmts(orelse)
+    s_while = [While(Name(str(test), ctx = Load), while_body, while_orelse)]
+    s = pre + s_while
+
+    return s
 
 
 
@@ -360,6 +404,11 @@ def trans_stmts(stmts, s_accu = [], kres = None):
                                    decorator_list = [], returns = None, type_comment = None)
 
                 s_accu = [defn] + st
+
+        elif isinstance(stmt, Global) or isinstance(stmt, Nonlocal):
+            # use additional pass to figure these out
+            continue
+
 
         else:
             s_accu = [stmt] + s_accu
@@ -690,16 +739,23 @@ def trans_exp(e):
         return e, None
 
 s = """
-while c:
-    while True:
-        p = 5
-        break
-    k = 7
-    break
-
-
-
+while vvv:
+    try:
+        i = next(vv)
+    except StopIteration:
+        vvv = False
+    if vvv:
+        if i == 1:
+            s = 0
+        if not n % i:
+            s = s + 1
+else:
+    print(s)
 """
+
+
+
+
 
 if __name__ == "__main__":
     with open("../example/dict.py", "r") as f:
