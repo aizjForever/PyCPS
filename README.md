@@ -14,4 +14,4 @@ pip3 install -r requirements.txt
 * additional pass: fix the scope of variables and declare global when necessary
 * different lazy eval strategy: yield vs. lambda (): ...
 * In trans_while, need to figure out what nonlocal variables are used in order to update the defaults for the keyword args (done in additional pass)
-* Since we translate while loops to tail calls, return statement in the source while might cause problems
+* Since we translate while loops to tail calls, return statements in the source while might cause problems
